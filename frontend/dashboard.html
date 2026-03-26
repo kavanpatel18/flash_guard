@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FlashGuard — Terminal Dashboard</title>
+  <meta name="description" content="FlashGuard AI Terminal — Real-time flash crash prediction, portfolio scanning, and CSV analysis." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body { overflow-y: auto; }
+
+    /* ── SYSTEM STATUS BAR ──────────────────────────────────── */
+    .sys-bar {
+      position: fixed; top: 64px; left: 0; right: 0; z-index: 300;
+      height: 30px;
+      background: rgba(2,4,8,0.95);
+      border-bottom: 1px solid var(--border-2);
+      display: flex; align-items: center;
+      padding: 0 40px; gap: 32px; overflow: hidden;
+    }
+    .sys-item {
+      display: flex; align-items: center; gap: 8px;
+      font-family: var(--font-mono); font-size: .62rem;
+      letter-spacing: .08em; color: var(--text-3);
+      white-space: nowrap;
+    }
+    .sys-item .dot { width: 5px; height: 5px; border-radius: 50%; }
+    .sys-item .dot.on { background: var(--safe); box-shadow: 0 0 5px var(--safe-glow); }
+    .sys-item .dot.off { background: var(--danger); }
+    .sys-item .dot.warn { background: var(--warn); }
+    .sys-sep { width: 1px; height: 14px; background: var(--border-2); flex-shrink: 0; }
+    .sys-clock { margin-left: auto; font-family: var(--font-mono); font-size: .62rem; color: var(--cyan); }
+
+    /* adjust dash wrap for sys-bar */
+    .dash-page-wrap { padding-top: 94px; }
+
+    /* ── CORNER DECORATIONS ─────────────────────────────────── */
+    .corner-tl, .corner-tr, .corner-bl, .corner-br {
+      position: absolute; width: 16px; height: 16px; pointer-events: none;
+    }
+    .corner-tl { top: 0; left: 0; border-top: 1px solid var(--cyan); border-left: 1px solid var(--cyan); }
+    .corner-tr { top: 0; right: 0; border-top: 1px solid var(--cyan); border-right: 1px solid var(--cyan); }
+    .corner-bl { bottom: 0; left: 0; border-bottom: 1px solid var(--cyan); border-left: 1px solid var(--cyan); opacity:.5; }
+    .corner-br { bottom: 0; right: 0; border-bottom: 1px solid var(--cyan); border-right: 1px solid var(--cyan); opacity:.5; }
+
+    /* ── CARD with corners ──────────────────────────────────── */
+    .card-corner { position: relative; }
+    .card-corner .corner-tl,
+    .card-corner .corner-tr,
+    .card-corner .corner-bl,
+    .card-corner .corner-br { z-index: 2; }
+
+    /* ── SCAN BUTTON for monitor ────────────────────────────── */
+    #btn-predict {
+      height: 36px; padding: 0 28px;
+      font-family: var(--font-display); font-size: .6rem; font-weight: 700;
+      letter-spacing: .1em; text-transform: uppercase;
+      color: var(--void); background: var(--cyan); cursor: pointer;
+      clip-path: polygon(6px 0%,100% 0%,calc(100% - 6px) 100%,0% 100%);
+      transition: all .25s; box-shadow: 0 0 20px var(--cyan-glow);
+      white-space: nowrap; margin-top: 20px; border: none;
+    }
+    #btn-predict:hover { background: #33daff; box-shadow: 0 0 40px var(--cyan-glow); transform: translateY(-2px); }
+
+    /* ── RISK GRID main ─────────────────────────────────────── */
+    .monitor-grid {
+      display: grid; grid-template-columns: 300px 1fr; gap: 16px; margin-bottom: 16px;
+    }
+
+    /* ── HOLOGRAPHIC SCAN LINE ──────────────────────────────── */
+    @keyframes scan-down {
+      0%{top:0;opacity:.6} 100%{top:100%;opacity:0}
+    }
+
+    /* ── TERMINAL HEADER ────────────────────────────────────── */
+    .terminal-header {
+      display: flex; align-items: center; gap: 12px; margin-bottom: 20px;
+      padding: 12px 16px;
+      background: var(--panel); border: 1px solid var(--border-2);
+      position: relative; overflow: hidden;
+    }
+    .terminal-header::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg,var(--cyan),var(--nova),transparent);
+    }
+    .th-label {
+      font-family: var(--font-mono); font-size: .68rem; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--text-3);
+    }
+    .th-val {
+      font-family: var(--font-mono); font-size: .75rem; color: var(--cyan);
+    }
+    .th-sep { color: var(--text-4); margin: 0 4px; }
+
+    @media (max-width:900px) {
+      .monitor-grid { grid-template-columns: 1fr; }
+      .sys-bar { display: none; }
+      .dash-page-wrap { padding-top: 64px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- CURSOR -->
+<div id="cur"></div>
+<div id="cur-ring"></div>
+
+<!-- ═══════════ NAVBAR ═══════════ -->
+<nav class="navbar" id="nb">
+  <a href="/" class="nav-brand">
+    <div class="nav-brand-icon">⚡</div>
+    FLASHGUARD
+  </a>
+  <div class="nav-links">
+    <a href="/" class="nav-link">HOME</a>
+    <a href="/dashboard.html" class="nav-link active">TERMINAL</a>
+    <a href="/#features" class="nav-link">FEATURES</a>
+    <a href="/#benefits" class="nav-link">ABOUT</a>
+  </div>
+  <a href="/" class="btn-cta">← HOME BASE</a>
+</nav>
+
+<!-- ═══════════ SYSTEM STATUS BAR ═══════════ -->
+<div class="sys-bar">
+  <div class="sys-item"><div class="dot on"></div>SYSTEM ONLINE</div>
+  <div class="sys-sep"></div>
+  <div class="sys-item"><div class="dot warn" id="api-dot"></div><span id="api-status">API CONNECTING…</span></div>
+  <div class="sys-sep"></div>
+  <div class="sys-item"><div class="dot on"></div>NIFTY 50 FEED</div>
+  <div class="sys-sep"></div>
+  <div class="sys-item"><div class="dot on"></div>KERAS ENGINE</div>
+  <div class="sys-sep"></div>
+  <div class="sys-item">MODEL: <span id="sb-model" style="color:var(--cyan);margin-left:4px;">—</span></div>
+  <div class="sys-clock" id="sys-clock">—</div>
+</div>
+
+<!-- ═══════════ DASHBOARD ═══════════ -->
+<div class="dash-page-wrap">
+  <div class="dash-inner">
+
+    <!-- HEADER -->
+    <div class="dash-page-header">
+      <h1>⚡ FLASHGUARD <span class="accent">TERMINAL</span></h1>
+      <div class="conn-row">
+        <div id="conn-dot"></div>
+        <span id="conn-text" style="font-family:var(--font-mono);font-size:.7rem;color:var(--text-3);">CONNECTING…</span>
+      </div>
+    </div>
+
+    <!-- CONFIG CONTROLS -->
+    <div class="controls" style="margin-bottom:16px;">
+      <div class="ctrl-group">
+        <span class="ctrl-label">// MODEL</span>
+        <select id="model-select" class="ctrl-select" style="min-width:200px;"></select>
+      </div>
+      <div class="ctrl-group">
+        <span class="ctrl-label">// UPSTOX ACCESS TOKEN</span>
+        <input type="password" id="upstox-token" class="ctrl-input" style="width:220px;" placeholder="PASTE_TOKEN_HERE…" autocomplete="off" />
+      </div>
+    </div>
+
+    <!-- TABS -->
+    <div class="app-tabs" id="app-tabs">
+      <button class="app-tab active" data-page="monitor">[ 01 ] REAL-TIME MONITOR</button>
+      <button class="app-tab" data-page="portfolio">[ 02 ] PORTFOLIO SCANNER</button>
+      <button class="app-tab" data-page="csv">[ 03 ] CSV ANALYSIS</button>
+    </div>
+
+    <!-- ═══ MONITOR ═══ -->
+    <div class="app-page active" id="page-monitor">
+      <!-- CONTROLS -->
+      <div class="controls">
+        <div class="ctrl-group">
+          <span class="ctrl-label">// TICKER</span>
+          <input type="text" id="ticker-input" class="ctrl-input" value="RELIANCE.NS" spellcheck="false" />
+        </div>
+        <div class="ctrl-group">
+          <span class="ctrl-label">// QUICK SELECT</span>
+          <select id="preset-select" class="ctrl-select">
+            <option value="">— SELECT STOCK —</option>
+            <option value="RELIANCE.NS">RELIANCE</option>
+            <option value="TCS.NS">TCS</option>
+            <option value="HDFCBANK.NS">HDFC BANK</option>
+            <option value="INFY.NS">INFOSYS</option>
+            <option value="ICICIBANK.NS">ICICI BANK</option>
+            <option value="SBIN.NS">SBI</option>
+            <option value="WIPRO.NS">WIPRO</option>
+            <option value="BAJFINANCE.NS">BAJAJ FINANCE</option>
+            <option value="ADANIENT.NS">ADANI ENT</option>
+            <option value="ITC.NS">ITC</option>
+            <option value="AXISBANK.NS">AXIS BANK</option>
+            <option value="MARUTI.NS">MARUTI</option>
+          </select>
+        </div>
+        <div class="ctrl-group">
+          <span class="ctrl-label">// TIMEFRAME</span>
+          <div class="interval-pills" id="interval-group">
+            <button class="pill-btn active" data-interval="1m">1M</button>
+            <button class="pill-btn" data-interval="30m">30M</button>
+            <button class="pill-btn" data-interval="1d">1D</button>
+            <button class="pill-btn" data-interval="1wk">1W</button>
+            <button class="pill-btn" data-interval="1mo">1MO</button>
+          </div>
+        </div>
+        <div class="ctrl-group">
+          <span class="ctrl-label">// AUTO-REFRESH</span>
+          <div class="auto-row">
+            <button class="toggle" id="btn-auto"></button>
+            <span class="timer" id="refresh-timer"></span>
+          </div>
+        </div>
+        <button id="btn-predict">▶ SCAN NOW</button>
+      </div>
+
+      <!-- RESULTS -->
+      <div id="monitor-results" class="hidden">
+        <div class="monitor-grid">
+          <!-- LEFT: RISK GAUGE -->
+          <div>
+            <div class="card card-corner" style="margin-bottom:16px;">
+              <div class="corner-tl"></div><div class="corner-tr"></div>
+              <div class="corner-bl"></div><div class="corner-br"></div>
+              <div class="card-head">
+                <span class="card-head-title">// RISK ASSESSMENT</span>
+                <span class="card-head-sub" id="risk-timestamp">—</span>
+              </div>
+              <div class="card-body risk-hero">
+                <div class="risk-ring-wrap">
+                  <canvas id="risk-ring" width="200" height="200"></canvas>
+                  <div class="risk-ring-center">
+                    <div class="risk-val" id="risk-pct">0.0</div>
+                    <div class="risk-unit">%</div>
+                  </div>
+                </div>
+                <div class="risk-badge stable" id="risk-badge">STABLE</div>
+                <div class="risk-desc" id="risk-desc">—</div>
+              </div>
+            </div>
+            <!-- STATS -->
+            <div class="stats-grid" style="margin-bottom:16px;">
+              <div class="stat-card">
+                <div class="stat-icon">💱</div>
+                <div class="stat-info"><span class="stat-label">CLOSE</span><span class="stat-value" id="stat-close">—</span></div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-icon">🔄</div>
+                <div class="stat-info"><span class="stat-label">RETURN</span><span class="stat-value mono" id="stat-return">—</span></div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-icon">📅</div>
+                <div class="stat-info"><span class="stat-label">DATE</span><span class="stat-value mono" id="stat-date">—</span></div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-icon">🧠</div>
+                <div class="stat-info"><span class="stat-label">MODEL</span><span class="stat-value mono" id="stat-model">—</span></div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-icon">⏱</div>
+                <div class="stat-info"><span class="stat-label">INTERVAL</span><span class="stat-value" id="stat-interval">—</span></div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-icon">📡</div>
+                <div class="stat-info"><span class="stat-label">SOURCE</span><span class="stat-value" id="stat-source">—</span></div>
+              </div>
+            </div>
+            <!-- SCAN HISTORY -->
+            <div class="card">
+              <div class="card-head">
+                <span class="card-head-title">// SCAN HISTORY</span>
+                <span class="card-head-sub" id="risk-history-count">0 SCANS</span>
+              </div>
+              <div class="chart-area sm"><canvas id="risk-history-chart"></canvas></div>
+            </div>
+          </div>
+
+          <!-- RIGHT: PRICE CHART -->
+          <div class="card" style="min-height:500px;">
+            <div class="card-head">
+              <span class="card-head-title">// PRICE ACTION · OHLCV</span>
+              <span class="card-head-sub" id="chart-subtitle">—</span>
+            </div>
+            <div id="price-chart" style="position:relative; width:100%; height:500px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="monitor-loading" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p>// FETCHING MARKET DATA · RUNNING INFERENCE…</p>
+      </div>
+      <div id="monitor-empty" class="empty-state">
+        <div class="empty-icon">⚡</div>
+        <h3>SYSTEM READY</h3>
+        <p>Select a ticker and initiate scan to begin real-time flash crash probability inference.</p>
+        <div class="empty-features">
+          <div class="empty-feat">15.9M BARS</div>
+          <div class="empty-feat">99.1% AUC</div>
+          <div class="empty-feat">REAL-TIME</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ PORTFOLIO ═══ -->
+    <div class="app-page" id="page-portfolio">
+      <div class="controls">
+        <div class="ctrl-group" style="flex:1;">
+          <span class="ctrl-label">// TICKER ARRAY (COMMA SEPARATED)</span>
+          <input type="text" id="portfolio-tickers" class="ctrl-input" style="width:100%;"
+            value="RELIANCE.NS, TCS.NS, HDFCBANK.NS, INFY.NS, ICICIBANK.NS, SBIN.NS, WIPRO.NS, BAJFINANCE.NS" spellcheck="false" />
+        </div>
+        <div class="ctrl-group">
+          <span class="ctrl-label">// TIMEFRAME</span>
+          <select id="portfolio-interval" class="ctrl-select">
+            <option value="1m">1M</option>
+            <option value="30m">30M</option>
+            <option value="1d" selected>1D</option>
+            <option value="1wk">1W</option>
+            <option value="1mo">1MO</option>
+          </select>
+        </div>
+        <button class="btn-scan" id="btn-portfolio">▶ SCAN PORTFOLIO</button>
+      </div>
+
+      <div id="portfolio-results" class="hidden">
+        <div class="card" style="margin-bottom:16px;">
+          <div class="card-head">
+            <span class="card-head-title">// PORTFOLIO RISK MATRIX</span>
+            <span class="card-head-sub" id="portfolio-subtitle">—</span>
+          </div>
+          <div id="portfolio-table-wrapper"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-head-title">// RISK DISTRIBUTION</span></div>
+          <div class="chart-area"><canvas id="portfolio-chart"></canvas></div>
+        </div>
+      </div>
+      <div id="portfolio-loading" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p>// SCANNING PORTFOLIO ARRAY…</p>
+      </div>
+      <div id="portfolio-empty" class="empty-state">
+        <div class="empty-icon">💼</div>
+        <h3>PORTFOLIO SCANNER</h3>
+        <p>Enter NSE tickers to run parallel crash-probability analysis across your entire position set.</p>
+        <div class="empty-features">
+          <div class="empty-feat">MULTI-ASSET</div>
+          <div class="empty-feat">RISK BARS</div>
+          <div class="empty-feat">INSTANT</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ CSV ═══ -->
+    <div class="app-page" id="page-csv">
+      <div class="controls">
+        <div class="ctrl-group" style="flex:1;">
+          <span class="ctrl-label">// UPLOAD OHLCV CSV</span>
+          <div class="upload-zone" id="upload-zone">
+            <input type="file" id="csv-file-input" accept=".csv" hidden />
+            <div class="upload-content" id="upload-content">
+              <span class="upload-icon">📂</span>
+              <span class="upload-text">CLICK OR DRAG & DROP CSV</span>
+              <span class="upload-hint">// COLUMNS: Date, Open, High, Low, Close, Volume</span>
+            </div>
+          </div>
+        </div>
+        <button class="btn-scan" id="btn-upload">▶ ANALYZE CSV</button>
+      </div>
+
+      <div id="upload-results" class="hidden">
+        <div class="dash-grid">
+          <div class="card">
+            <div class="card-head"><span class="card-head-title">// RISK ASSESSMENT</span></div>
+            <div class="card-body risk-hero" id="upload-risk-hero">
+              <div class="risk-ring-wrap">
+                <canvas id="upload-risk-ring" width="200" height="200"></canvas>
+                <div class="risk-ring-center">
+                  <div class="risk-val" id="upload-risk-pct">0.0</div>
+                  <div class="risk-unit">%</div>
+                </div>
+              </div>
+              <div class="risk-badge stable" id="upload-risk-badge">STABLE</div>
+              <div class="risk-desc" id="upload-risk-desc">—</div>
+            </div>
+          </div>
+          <div>
+            <div class="upload-meta-grid" id="upload-meta" style="margin-bottom:12px;"></div>
+            <div class="card">
+              <div class="card-head"><span class="card-head-title">// FEATURE VECTOR</span></div>
+              <div id="upload-features-wrapper"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="upload-loading" class="loading-state hidden">
+        <div class="spinner"></div>
+        <p>// RUNNING INFERENCE ON CSV…</p>
+      </div>
+      <div id="upload-empty" class="empty-state">
+        <div class="empty-icon">📄</div>
+        <h3>CSV ANALYSIS ENGINE</h3>
+        <p>Upload any OHLCV formatted CSV for deep learning crash probability inference.</p>
+        <div class="empty-features">
+          <div class="empty-feat">CSV FORMAT</div>
+          <div class="empty-feat">DEEP LEARNING</div>
+          <div class="empty-feat">14 FEATURES</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer class="site-footer">
+  <div class="footer-brand">
+    <div class="nav-brand-icon" style="width:28px;height:28px;font-size:.75rem;">⚡</div>
+    FLASHGUARD
+  </div>
+  <div class="footer-links">
+    <a href="/" class="footer-link">HOME</a>
+    <a href="/#features" class="footer-link">FEATURES</a>
+    <a href="/#model" class="footer-link">MODEL</a>
+    <a href="/#benefits" class="footer-link">ABOUT</a>
+  </div>
+  <div class="footer-copy">© 2026 FLASHGUARD · AI FLASH CRASH DETECTION · BiGRU + ATTENTION · 15.9M NIFTY BARS</div>
+</footer>
+
+<script>
+/* CURSOR */
+const cur=document.getElementById('cur'),ring=document.getElementById('cur-ring');
+let cx=0,cy=0,rx=0,ry=0;
+document.addEventListener('mousemove',e=>{cx=e.clientX;cy=e.clientY;});
+(function anim(){cur.style.left=cx+'px';cur.style.top=cy+'px';rx+=(cx-rx)*.12;ry+=(cy-ry)*.12;ring.style.left=rx+'px';ring.style.top=ry+'px';requestAnimationFrame(anim);})();
+
+/* SYS CLOCK */
+function updateClock(){
+  const n=new Date();
+  const p=v=>String(v).padStart(2,'0');
+  document.getElementById('sys-clock').textContent=`${p(n.getHours())}:${p(n.getMinutes())}:${p(n.getSeconds())} IST`;
+}
+setInterval(updateClock,1000); updateClock();
+</script>
+<script src="app.js"></script>
+</body>
+</html>
