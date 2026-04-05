@@ -7,22 +7,51 @@ FlashGuard v4 — Upstox-First Real-Time API Server
 • Attention layer weights: W=(u,u)  b=(u,)  V=(u,)  [flat]
 
 Run:
-    pip install flask flask-cors numpy pandas requests scikit-learn tensorflow "yfinance==0.2.38"
+    pip install -r requirements.txt
     python api_server.py
     → http://localhost:5000
 """
 
-import io, sys, traceback, time, random, json
+import io, sys, traceback, time, random, json, logging, os
 from datetime import date, timedelta, datetime
 from pathlib import Path
+from functools import wraps
+
+# ── Load .env before anything else ────────────────────────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv optional; environment vars may already be set
 
 import numpy  as np
 import pandas as pd
 import requests
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, g
 from flask_cors import CORS
 from sklearn.preprocessing import StandardScaler
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOGGING CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_LOG_LEVEL_STR = os.getenv("LOG_LEVEL", "INFO").upper()
+_LOG_LEVEL     = getattr(logging, _LOG_LEVEL_STR, logging.INFO)
+_LOG_FILE      = os.getenv("LOG_FILE", "")
+
+_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+if _LOG_FILE:
+    _handlers.append(logging.FileHandler(_LOG_FILE, encoding="utf-8"))
+
+logging.basicConfig(
+    level   = _LOG_LEVEL,
+    format  = "%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
+    datefmt = "%Y-%m-%d %H:%M:%S",
+    handlers= _handlers,
+)
+
+logger = logging.getLogger("flashguard")
 
 # ── Keras ─────────────────────────────────────────────────────────────────────
 try:
@@ -30,10 +59,10 @@ try:
     import keras
     from keras.models import load_model as _keras_load
     KERAS_OK = True
-    print(f"  TensorFlow {tf.__version__} ready")
+    logger.info("TensorFlow %s ready", tf.__version__)
 except ImportError:
     KERAS_OK = False
-    print("  WARNING: TensorFlow not installed")
+    logger.warning("TensorFlow not installed — model inference disabled")
 
 if KERAS_OK:
     @keras.saving.register_keras_serializable(package="custom_layers")
@@ -52,24 +81,76 @@ if KERAS_OK:
             return tf.reduce_sum(x * w, axis=1)
         def get_config(self):
             return super().get_config()
-    _CUSTOM = {"Attention": Attention}
+
+    @keras.saving.register_keras_serializable(package="custom_layers")
+    class TemporalAttention(keras.layers.Layer):
+        def __init__(self, units=64, **kwargs):
+            super().__init__(**kwargs)
+            self.units = units
+            self.W = keras.layers.Dense(units, use_bias=False)
+            self.v = keras.layers.Dense(1, use_bias=False)
+        def call(self, hidden_states, training=False):
+            score   = self.v(tf.nn.tanh(self.W(hidden_states)))
+            weights = tf.nn.softmax(score, axis=1)
+            context = tf.reduce_sum(weights * hidden_states, axis=1)
+            return context
+        def get_config(self):
+            cfg = super().get_config()
+            cfg.update({"units": self.units})
+            return cfg
+
+    _CUSTOM = {"Attention": Attention, "TemporalAttention": TemporalAttention}
 else:
     _CUSTOM = {}
 
-# ── Paths & Flask ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION (environment-driven)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND = BASE_DIR / "frontend"
 
+FLASK_HOST      = os.getenv("FLASK_HOST",      "0.0.0.0")
+FLASK_PORT      = int(os.getenv("FLASK_PORT",  "5000"))
+FLASK_DEBUG     = os.getenv("FLASK_DEBUG",     "false").lower() == "true"
+DEFAULT_TOKEN   = os.getenv("UPSTOX_TOKEN",    "")
+MODEL_THRESHOLD = float(os.getenv("MODEL_THRESHOLD", "0.20"))
+DEFAULT_MODEL   = os.getenv("DEFAULT_MODEL",   "msa_gru_best.keras")
+
+logger.info("Config loaded | host=%s port=%d debug=%s threshold=%.2f default_model=%s",
+            FLASK_HOST, FLASK_PORT, FLASK_DEBUG, MODEL_THRESHOLD, DEFAULT_MODEL)
+
+# ── Flask ─────────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=str(FRONTEND), static_url_path="")
 CORS(app)
 
-# ── Upstox config ─────────────────────────────────────────────────────────────
+# Suppress Flask/Werkzeug access logs unless DEBUG is on
+if not FLASK_DEBUG:
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REQUEST TIMING MIDDLEWARE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.before_request
+def _start_timer():
+    g.start_time = time.perf_counter()
+
+@app.after_request
+def _log_request(response):
+    duration_ms = (time.perf_counter() - g.start_time) * 1000
+    logger.info(
+        "%s %s → %d  (%.1f ms)",
+        request.method, request.path, response.status_code, duration_ms,
+    )
+    return response
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UPSTOX CONFIG
+# ═══════════════════════════════════════════════════════════════════════════════
+
 UPSTOX_BASE = "https://api.upstox.com/v2"
 
-# Default token — can be overridden per-request
-DEFAULT_TOKEN = ""   # User pastes token in the UI; this is the hardcoded fallback
-
-# NSE instrument key map
 NSE_MAP = {
     "RELIANCE":   "NSE_EQ|INE002A01018",
     "TCS":        "NSE_EQ|INE467B01029",
@@ -96,11 +177,9 @@ NSE_MAP = {
     "SENSEX":     "BSE_INDEX|SENSEX",
 }
 
-# Add .NS variants
 for k in list(NSE_MAP.keys()):
     NSE_MAP[k + ".NS"] = NSE_MAP[k]
 
-# Upstox interval map
 IV_MAP = {
     "1m":  "1minute",
     "30m": "30minute",
@@ -109,11 +188,20 @@ IV_MAP = {
     "1mo": "month",
 }
 
-# ── Model registry ────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODEL REGISTRY
+# ═══════════════════════════════════════════════════════════════════════════════
+
 MODEL_PRIORITY = [
+    DEFAULT_MODEL,
+    "msa_gru_best.keras",
     "improved_minute_model.keras",
     "improved_flash_crash_model.keras",
 ]
+# Deduplicate while preserving order
+_seen = set()
+MODEL_PRIORITY = [m for m in MODEL_PRIORITY if not (m in _seen or _seen.add(m))]
+
 _loaded: dict = {}
 
 def _discover():
@@ -127,9 +215,10 @@ def _load(name: str):
         raise FileNotFoundError(f"Model not found: {name}")
     if not KERAS_OK:
         raise RuntimeError("TensorFlow not installed")
+    logger.info("Loading model: %s", name)
     m = _keras_load(str(fp), compile=False, custom_objects=_CUSTOM)
     _loaded[name] = m
-    print(f"  ✓ Loaded {name}: input={m.input_shape}")
+    logger.info("Model loaded: %s  input_shape=%s", name, m.input_shape)
     return m
 
 def _sig(model):
@@ -138,10 +227,14 @@ def _sig(model):
 
 def _best():
     f = _discover()
-    if not f: raise RuntimeError("No model files found next to api_server.py")
+    if not f:
+        raise RuntimeError("No model files found next to api_server.py")
     return f[0]
 
-# ── Features ──────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURES
+# ═══════════════════════════════════════════════════════════════════════════════
+
 FEATURES_10 = [
     "return", "log_return",
     "volatility_5", "volatility_10", "volatility_20",
@@ -154,8 +247,16 @@ FEATURES_14 = [
     "high_low_spread","open_close_return","turnover_change",
 ]
 FEATURES_5 = ["return","volume_change","volatility_5","volatility_10","momentum_5"]
+FEATURES_MSA = [
+    "return_1", "return_5", "return_10",
+    "vol_10", "vol_30", "vol_60",
+    "ema_ratio_10_30", "ema_ratio_10_60",
+    "rsi_14", "spread", "vol_zscore",
+    "intraday_range", "momentum_10", "momentum_30",
+]
 
-def _pick_features(n):
+def _pick_features(n, model_name=""):
+    if "msa" in model_name.lower(): return FEATURES_MSA
     if n == 10: return FEATURES_10
     if n == 14: return FEATURES_14
     if n == 5:  return FEATURES_5
@@ -188,11 +289,36 @@ def _engineer(df):
     o["open_close_return"]  = (o["Close"] - o["Open"]) / o["Open"].replace(0, np.nan)
     o["turnover_change"]    = (o["Close"] * o["Volume"]).pct_change()
     o["price_acceleration"] = o["return"].diff()
+
+    # -- MSA GRU Features --
+    o["return_1"] = o["Close"].pct_change(1)
+    o["return_5"] = o["Close"].pct_change(5)
+    o["return_10"] = o["Close"].pct_change(10)
+    o["vol_10"] = o["return_1"].rolling(10).std()
+    o["vol_30"] = o["return_1"].rolling(30).std()
+    o["vol_60"] = o["return_1"].rolling(60).std()
+    o["ema_10"] = o["Close"].ewm(span=10, adjust=False).mean()
+    o["ema_30"] = o["Close"].ewm(span=30, adjust=False).mean()
+    o["ema_60"] = o["Close"].ewm(span=60, adjust=False).mean()
+    o["ema_ratio_10_30"] = o["ema_10"] / o["ema_30"] - 1
+    o["ema_ratio_10_60"] = o["ema_10"] / o["ema_60"] - 1
+    
+    delta = o["Close"].diff()
+    gain  = delta.clip(lower=0).rolling(14).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    rs    = gain / (loss + 1e-9)
+    o["rsi_14"] = 100 - 100 / (1 + rs)
+    
+    o["spread"] = (o["High"] - o["Low"]) / o["Close"].replace(0, np.nan)
+    o["vol_zscore"] = (o["Volume"] - o["Volume"].rolling(30).mean()) / o["Volume"].rolling(30).std().replace(0, np.nan)
+    o["intraday_range"] = (o["High"] - o["Low"]) / o["Open"].replace(0, np.nan)
+    o["momentum_30"] = o["Close"] / o["Close"].shift(30) - 1
+
     return o
 
-def _build_seq(df, timesteps, n_feat):
+def _build_seq(df, timesteps, n_feat, model_name=""):
     eng   = _engineer(df)
-    feats = _pick_features(n_feat)
+    feats = _pick_features(n_feat, model_name)
     ff    = eng[feats].replace([np.inf,-np.inf], np.nan).bfill().ffill().fillna(0)
     if len(ff) < timesteps:
         raise ValueError(f"Need {timesteps} rows, only got {len(ff)}. Use a longer period.")
@@ -200,12 +326,14 @@ def _build_seq(df, timesteps, n_feat):
     ff  = pd.DataFrame(sc.fit_transform(ff), columns=feats, index=ff.index)
     return np.expand_dims(ff.tail(timesteps).to_numpy(np.float32), 0), eng
 
-# ── Upstox data fetcher (PRIMARY) ─────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# UPSTOX DATA FETCHER (PRIMARY)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _upstox_headers(token):
     return {"Accept": "application/json", "Authorization": f"Bearer {token}"}
 
 def _upstox_candles(instrument_key, interval, token, period="6mo"):
-    """Fetch historical + intraday candles from Upstox v2."""
     enc = instrument_key.replace("|", "%7C")
     hdr = _upstox_headers(token)
     all_candles = []
@@ -213,7 +341,6 @@ def _upstox_candles(instrument_key, interval, token, period="6mo"):
     days_map = {"5d":7,"1mo":35,"3mo":95,"6mo":185,"1y":370,"2y":740,"5y":1825}
 
     if interval in ("1minute", "30minute"):
-        # Historical: last 7 days
         h_from = (date.today() - timedelta(days=7)).strftime("%Y-%m-%d")
         h_to   = date.today().strftime("%Y-%m-%d")
         url    = f"{UPSTOX_BASE}/historical-candle/{enc}/{interval}/{h_to}/{h_from}"
@@ -229,10 +356,11 @@ def _upstox_candles(instrument_key, interval, token, period="6mo"):
             d = r.json()
             if d.get("status") == "success":
                 all_candles = d.get("data", {}).get("candles", [])
+        else:
+            logger.warning("Upstox historical: HTTP %d for %s", r.status_code, instrument_key)
     except Exception as e:
-        print(f"  Upstox historical error: {e}")
+        logger.error("Upstox historical error: %s", e)
 
-    # Also fetch today's intraday for minute intervals
     if interval in ("1minute", "30minute"):
         try:
             url2 = f"{UPSTOX_BASE}/historical-candle/intraday/{enc}/{interval}"
@@ -242,7 +370,7 @@ def _upstox_candles(instrument_key, interval, token, period="6mo"):
                 if d2.get("status") == "success":
                     all_candles += d2.get("data", {}).get("candles", [])
         except Exception as e:
-            print(f"  Upstox intraday error: {e}")
+            logger.error("Upstox intraday error: %s", e)
 
     if not all_candles:
         return None
@@ -257,7 +385,6 @@ def _upstox_candles(instrument_key, interval, token, period="6mo"):
 
 
 def _upstox_quote(instrument_key, token):
-    """Get live LTP from Upstox market quote."""
     try:
         hdr = _upstox_headers(token)
         enc = instrument_key.replace("|", "%7C")
@@ -281,12 +408,11 @@ def _upstox_quote(instrument_key, token):
                         "change_pct": q.get("net_change", 0) / max(q.get("ohlc",{}).get("close",1),1) * 100,
                     }
     except Exception as e:
-        print(f"  Upstox quote error: {e}")
+        logger.error("Upstox quote error: %s", e)
     return None
 
 
 def _market_overview(token):
-    """Fetch live quotes for major indices and stocks."""
     tickers = {
         "NIFTY 50":   "NSE_INDEX|Nifty 50",
         "BANK NIFTY": "NSE_INDEX|Nifty Bank",
@@ -308,11 +434,9 @@ def _market_overview(token):
             if d.get("status") == "success":
                 data = d.get("data", {})
                 for name, ikey in tickers.items():
-                    # Upstox returns key with | replaced by :
                     lookup = ikey.replace("|",":")
                     q = data.get(lookup) or data.get(ikey) or {}
                     if not q:
-                        # Try matching by partial key
                         for dk in data.keys():
                             if ikey.split("|")[1] in dk:
                                 q = data[dk]; break
@@ -330,12 +454,17 @@ def _market_overview(token):
                         "high":    round(ohlc.get("high", 0), 2),
                         "low":     round(ohlc.get("low", 0), 2),
                     })
+        else:
+            logger.warning("Market overview HTTP %d", r.status_code)
     except Exception as e:
-        print(f"  Market overview error: {e}")
+        logger.error("Market overview error: %s", e)
     return results
 
 
-# ── Demo data fallback ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# DEMO DATA FALLBACK
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _demo(period="6mo", interval="1d", seed=42):
     td = {"5d":5,"1mo":22,"3mo":66,"6mo":132,"1y":252,"2y":504}.get(period,132)
     if interval in {"1m","30m"}:
@@ -353,7 +482,10 @@ def _demo(period="6mo", interval="1d", seed=42):
     return pd.DataFrame({"Open":open_,"High":high,"Low":low,"Close":close,"Volume":vol},index=ts)
 
 
-# ── Main fetch function ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN FETCH FUNCTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _fetch(ticker, period="6mo", interval="1d", token=None):
     """
     1. Try Upstox (if token provided)
@@ -370,12 +502,12 @@ def _fetch(ticker, period="6mo", interval="1d", token=None):
         try:
             df = _upstox_candles(ikey, up_iv, token, period)
             if df is not None and len(df) > 5:
-                print(f"  ✓ Upstox: {len(df)} candles for {ticker}")
+                logger.info("Upstox: %d candles for %s", len(df), ticker)
                 return df, "upstox"
             else:
-                print(f"  Upstox returned empty for {ticker}")
+                logger.warning("Upstox returned empty data for %s — trying fallback", ticker)
         except Exception as e:
-            print(f"  Upstox fetch error: {e}")
+            logger.error("Upstox fetch error for %s: %s", ticker, e)
 
     # ── 2. yFinance ────────────────────────────────────────────────────────────
     try:
@@ -385,17 +517,19 @@ def _fetch(ticker, period="6mo", interval="1d", token=None):
         if df is not None and not df.empty:
             df = _flatten(df)
             df.index = pd.to_datetime(df.index)
-            print(f"  ✓ yFinance: {len(df)} rows for {ticker}")
+            logger.info("yFinance: %d rows for %s", len(df), ticker)
             return df, "yfinance"
     except Exception as e:
-        print(f"  yFinance error: {e}")
+        logger.error("yFinance error for %s: %s", ticker, e)
 
     # ── 3. Demo ────────────────────────────────────────────────────────────────
-    print(f"  Using demo data for {ticker}")
+    logger.warning("Using demo data for %s", ticker)
     return _demo(period, interval), "demo"
 
 
-def _risk_band(prob, threshold=0.20):
+def _risk_band(prob, threshold=None):
+    if threshold is None:
+        threshold = MODEL_THRESHOLD
     if prob >= threshold:        return "HIGH RISK"
     if prob >= threshold * 0.65: return "ELEVATED"
     return "STABLE"
@@ -440,13 +574,13 @@ def list_models():
             m = _load(name); ts,nf = _sig(m)
             out.append({"name":name,"timesteps":ts,"features":nf,"params":int(m.count_params())})
         except Exception as e:
+            logger.error("Failed to load model %s: %s", name, e)
             out.append({"name":name,"error":str(e).split("\n")[0]})
     return jsonify(out)
 
 
 @app.route("/api/market-overview", methods=["POST"])
 def market_overview():
-    """Live market overview — indices + top stocks."""
     try:
         d     = request.json or {}
         token = d.get("token") or DEFAULT_TOKEN
@@ -455,13 +589,12 @@ def market_overview():
         data = _market_overview(token)
         return jsonify({"data": data, "timestamp": datetime.now().strftime("%H:%M:%S")})
     except Exception as e:
-        traceback.print_exc()
+        logger.error("Market overview route error: %s", e, exc_info=True)
         return jsonify({"error":str(e),"data":[]}), 400
 
 
 @app.route("/api/quote", methods=["POST"])
 def quote():
-    """Live LTP for a single ticker."""
     try:
         d      = request.json or {}
         ticker = d.get("ticker","RELIANCE")
@@ -475,6 +608,7 @@ def quote():
             return jsonify(q)
         return jsonify({"error":"Quote unavailable"}), 400
     except Exception as e:
+        logger.error("Quote route error: %s", e, exc_info=True)
         return jsonify({"error":str(e)}), 400
 
 
@@ -486,17 +620,26 @@ def predict():
         model_name = d.get("model") or _best()
         period     = d.get("period","6mo")
         interval   = d.get("interval","1d")
-        threshold  = float(d.get("threshold",0.20))
+        threshold  = float(d.get("threshold", MODEL_THRESHOLD))
         token      = d.get("token") or d.get("upstox_token") or DEFAULT_TOKEN
+
+        logger.info("Predict request: ticker=%s model=%s period=%s interval=%s",
+                    ticker, model_name, period, interval)
 
         model      = _load(model_name)
         ts, nf     = _sig(model)
         df, source = _fetch(ticker, period, interval, token=token)
-        seq, eng   = _build_seq(df, ts, nf)
-        prob       = float(np.clip(model.predict(seq,verbose=0).ravel()[0],0,1))
-        band       = _risk_band(prob, threshold)
+        seq, eng   = _build_seq(df, ts, nf, model_name)
 
-        # OHLC for chart — return all available bars (up to 200)
+        t0   = time.perf_counter()
+        prob = float(np.clip(model.predict(seq,verbose=0).ravel()[0],0,1))
+        inf_ms = (time.perf_counter() - t0) * 1000
+
+        logger.info("Inference done: ticker=%s prob=%.4f band=%s latency=%.1fms",
+                    ticker, prob, _risk_band(prob, threshold), inf_ms)
+
+        band = _risk_band(prob, threshold)
+
         chart_df = _flatten(df).tail(200)
         ohlc = [
             {"date":  str(idx)[:19],
@@ -508,7 +651,6 @@ def predict():
             for idx, r in chart_df.iterrows()
         ]
 
-        # Try to get live LTP from Upstox quote
         live_price = None
         if token:
             clean = ticker.upper().replace(".NS","")
@@ -535,7 +677,7 @@ def predict():
             "live_price":  live_price,
         })
     except Exception as e:
-        traceback.print_exc()
+        logger.error("Predict route error: %s", e, exc_info=True)
         return jsonify({"error":str(e)}), 400
 
 
@@ -547,25 +689,28 @@ def portfolio():
         model_name = d.get("model") or _best()
         period     = d.get("period","6mo")
         interval   = d.get("interval","1d")
-        threshold  = float(d.get("threshold",0.20))
+        threshold  = float(d.get("threshold", MODEL_THRESHOLD))
         token      = d.get("token") or d.get("upstox_token") or DEFAULT_TOKEN
+
+        logger.info("Portfolio request: tickers=%s model=%s", tickers, model_name)
 
         model  = _load(model_name); ts,nf = _sig(model)
         results = []
         for t in tickers:
             try:
                 df,source = _fetch(t,period,interval,token=token)
-                seq,_     = _build_seq(df,ts,nf)
+                seq,_     = _build_seq(df,ts,nf, model_name)
                 prob      = float(np.clip(model.predict(seq,verbose=0).ravel()[0],0,1))
                 results.append({"ticker":t,"probability":round(prob,6),
                                  "risk_pct":round(prob*100,2),"band":_risk_band(prob,threshold),
                                  "latest_close":round(float(df["Close"].iloc[-1]),2),"source":source})
             except Exception as e:
+                logger.warning("Portfolio error for %s: %s", t, e)
                 results.append({"ticker":t,"error":str(e)})
         results.sort(key=lambda x:x.get("probability",0),reverse=True)
         return jsonify({"results":results,"model":model_name,"threshold":threshold})
     except Exception as e:
-        traceback.print_exc()
+        logger.error("Portfolio route error: %s", e, exc_info=True)
         return jsonify({"error":str(e)}), 400
 
 
@@ -576,34 +721,34 @@ def upload_csv():
             return jsonify({"error":"No file uploaded"}), 400
         f          = request.files["file"]
         model_name = request.form.get("model") or _best()
-        threshold  = float(request.form.get("threshold",0.20))
+        threshold  = float(request.form.get("threshold", MODEL_THRESHOLD))
         model      = _load(model_name); ts,nf = _sig(model)
         df         = _norm(pd.read_csv(io.BytesIO(f.read())))
-        seq,eng    = _build_seq(df,ts,nf)
+        seq,eng    = _build_seq(df,ts,nf, model_name)
         prob       = float(np.clip(model.predict(seq,verbose=0).ravel()[0],0,1))
-        feats      = _pick_features(nf)
+        feats      = _pick_features(nf, model_name)
         snap       = {k:round(float(v),6) for k,v in eng[feats].dropna().tail(1).iloc[0].to_dict().items()}
+        logger.info("CSV upload: model=%s rows=%d prob=%.4f", model_name, len(df), prob)
         return jsonify({"probability":round(prob,6),"risk_pct":round(prob*100,2),
                          "band":_risk_band(prob,threshold),"threshold":threshold,
                          "model":model_name,"rows_loaded":len(df),"features":snap})
     except Exception as e:
-        traceback.print_exc()
+        logger.error("Upload route error: %s", e, exc_info=True)
         return jsonify({"error":str(e)}), 400
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print("="*62)
-    print("  ⚡ FlashGuard v4 — Upstox Real-Time Server")
-    print("="*62)
+    logger.info("=" * 62)
+    logger.info("  ⚡ FlashGuard v4 — Upstox Real-Time Server")
+    logger.info("=" * 62)
     found = _discover()
-    print(f"  Models   : {found}")
-    print(f"  Frontend : {FRONTEND}")
-    print(f"  URL      : http://localhost:5000")
-    print(f"  Dashboard: http://localhost:5000/dashboard.html")
-    print("="*62)
+    logger.info("  Models   : %s", found)
+    logger.info("  Frontend : %s", FRONTEND)
+    logger.info("  URL      : http://%s:%d", FLASK_HOST, FLASK_PORT)
+    logger.info("  Dashboard: http://%s:%d/dashboard.html", FLASK_HOST, FLASK_PORT)
+    logger.info("=" * 62)
     for name in found:
-        try:   _load(name); print(f"  ✓ {name}")
-        except Exception as e: print(f"  ✗ {name}: {e}")
-    print()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+        try:   _load(name)
+        except Exception as e: logger.error("  Failed to pre-load %s: %s", name, e)
+    app.run(host=FLASK_HOST, port=FLASK_PORT, debug=FLASK_DEBUG)
