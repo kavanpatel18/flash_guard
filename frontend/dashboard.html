@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 /* ── RESET & TOKENS ─────────────────────────────────────── */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -300,7 +301,7 @@ input:focus,select:focus{border-color:var(--cyan)}
           <h3>Ready to Scan</h3>
           <p>Enter a ticker and click SCAN to load live price data and run the flash crash model.</p>
         </div>
-        <canvas id="priceChart" class="hidden"></canvas>
+        <div id="priceChart" class="hidden"></div>
       </div>
 
       <div class="bottom-strip">

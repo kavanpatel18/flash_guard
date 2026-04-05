@@ -347,166 +347,81 @@ function renderScan(data) {
 // ── Candlestick Chart ─────────────────────────────────────────────────────────
 function drawCandleChart(ohlc) {
     document.getElementById("chartEmpty").classList.add("hidden");
-    const canvas = document.getElementById("priceChart");
-    canvas.classList.remove("hidden");
+    const container = document.getElementById("priceChart");
+    container.classList.remove("hidden");
 
-    if (priceChart) { priceChart.destroy(); priceChart = null; }
+    if (priceChart) { priceChart.remove(); priceChart = null; }
     if (!ohlc || !ohlc.length) return;
 
-    const ctx = canvas.getContext("2d");
+    container.innerHTML = "";
 
-    // Colours
-    const GREEN  = "#3fb950";
-    const RED    = "#f85149";
-    const GREENA = "rgba(63,185,80,0.7)";
-    const REDA   = "rgba(248,81,73,0.7)";
-    const GRID   = "rgba(48,54,61,0.6)";
-    const TEXT   = "#8b949e";
-    const MONO   = "'JetBrains Mono', monospace";
-
-    // Build candlestick data as custom bars
-    // Chart.js doesn't have a native candlestick type, so we use a Float bar plugin trick:
-    // We draw wicks via a custom plugin and use bar for candle bodies
-    const labels  = ohlc.map(d => d.date.slice(0,10));
-    const opens   = ohlc.map(d => d.open);
-    const highs   = ohlc.map(d => d.high);
-    const lows    = ohlc.map(d => d.low);
-    const closes  = ohlc.map(d => d.close);
-    const volumes = ohlc.map(d => d.volume || 0);
-    const colors  = ohlc.map(d => d.close >= d.open ? GREENA : REDA);
-    const borders = ohlc.map(d => d.close >= d.open ? GREEN  : RED);
-
-    // Candlestick body = [open, close] as a floating bar
-    const candleData = ohlc.map(d => [
-        Math.min(d.open, d.close),
-        Math.max(d.open, d.close)
-    ]);
-
-    // Volume (separate y-axis)
-    const maxVol = Math.max(...volumes);
-
-    // Custom plugin to draw wicks
-    const wickPlugin = {
-        id: "wickPlugin",
-        afterDatasetsDraw(chart) {
-            const { ctx, data, scales } = chart;
-            const ds  = data.datasets[0];
-            const meta= chart.getDatasetMeta(0);
-            if (!meta.visible) return;
-            ctx.save();
-            meta.data.forEach((bar, i) => {
-                const x = bar.x;
-                const yScale = scales["y"];
-                const high  = yScale.getPixelForValue(highs[i]);
-                const low   = yScale.getPixelForValue(lows[i]);
-                const bodyT = Math.min(bar.y, bar.base);
-                const bodyB = Math.max(bar.y, bar.base);
-                ctx.beginPath();
-                ctx.strokeStyle = borders[i];
-                ctx.lineWidth   = 1;
-                // Upper wick
-                ctx.moveTo(x, high);
-                ctx.lineTo(x, bodyT);
-                // Lower wick
-                ctx.moveTo(x, bodyB);
-                ctx.lineTo(x, low);
-                ctx.stroke();
-            });
-            ctx.restore();
-        }
+    const chartProperties = {
+        layout: { background: { type: 'solid', color: 'transparent' }, textColor: '#8b949e' },
+        grid: {
+            vertLines: { color: 'rgba(48, 54, 61, 0.4)' },
+            horzLines: { color: 'rgba(48, 54, 61, 0.4)' },
+        },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: 'rgba(48, 54, 61, 0.6)' },
+        timeScale: { borderColor: 'rgba(48, 54, 61, 0.6)', timeVisible: true },
     };
 
-    priceChart = new Chart(ctx, {
-        type: "bar",
-        plugins: [wickPlugin],
-        data: {
-            labels,
-            datasets: [
-                {
-                    label:           "OHLC",
-                    data:            candleData,
-                    backgroundColor: colors,
-                    borderColor:     borders,
-                    borderWidth:     1,
-                    borderSkipped:   false,
-                    yAxisID:         "y",
-                    order:           1,
-                    barPercentage:   0.6,
-                    categoryPercentage: 0.8,
-                },
-                {
-                    type:            "bar",
-                    label:           "Volume",
-                    data:            volumes,
-                    backgroundColor: ohlc.map(d => d.close>=d.open
-                        ? "rgba(63,185,80,0.25)" : "rgba(248,81,73,0.25)"),
-                    yAxisID:         "yVol",
-                    order:           2,
-                    barPercentage:   0.8,
-                    categoryPercentage: 0.9,
-                }
-            ]
-        },
-        options: {
-            responsive:          true,
-            maintainAspectRatio: false,
-            animation:           { duration: 300 },
-            interaction:         { intersect: false, mode: "index" },
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    backgroundColor: "#161b22",
-                    borderColor:     "#30363d",
-                    borderWidth:     1,
-                    titleColor:      "#e6edf3",
-                    bodyColor:       "#8b949e",
-                    cornerRadius:    6,
-                    padding:         10,
-                    titleFont:       { family: MONO, size: 11 },
-                    bodyFont:        { family: MONO, size: 11 },
-                    callbacks: {
-                        title: items => labels[items[0].dataIndex],
-                        label: item => {
-                            if (item.dataset.label === "OHLC") {
-                                const i = item.dataIndex;
-                                return [
-                                    `O: ₹${opens[i].toLocaleString("en-IN")}`,
-                                    `H: ₹${highs[i].toLocaleString("en-IN")}`,
-                                    `L: ₹${lows[i].toLocaleString("en-IN")}`,
-                                    `C: ₹${closes[i].toLocaleString("en-IN")}`,
-                                ];
-                            }
-                            return `Vol: ${item.raw.toLocaleString()}`;
-                        }
-                    }
-                }
-            },
-            scales: {
-                x: {
-                    grid:  { color: GRID, drawBorder: false },
-                    ticks: {
-                        color: TEXT, maxRotation: 0, autoSkip: true,
-                        maxTicksLimit: 12,
-                        font: { size: 10, family: MONO }
-                    }
-                },
-                y: {
-                    position: "right",
-                    grid:     { color: GRID, drawBorder: false },
-                    ticks:    {
-                        color: TEXT, font: { size: 10, family: MONO },
-                        callback: v => "₹" + v.toLocaleString("en-IN")
-                    }
-                },
-                yVol: {
-                    position:   "left",
-                    grid:       { display: false },
-                    ticks:      { display: false },
-                    max:        maxVol * 5,   // push volume bars to bottom 20%
-                }
+    priceChart = LightweightCharts.createChart(container, chartProperties);
+    
+    const candleSeries = priceChart.addCandlestickSeries({
+        upColor: '#3fb950', downColor: '#f85149',
+        borderDownColor: '#f85149', borderUpColor: '#3fb950',
+        wickDownColor: '#f85149', wickUpColor: '#3fb950',
+    });
+
+    const uniqueData = [], seen = new Set();
+    const formattedData = ohlc.map(d => {
+        let timeObj;
+        if (d.date.length <= 10 || currentInterval.includes('d') || currentInterval.includes('wk') || currentInterval.includes('mo')) {
+            const parts = d.date.split(' ')[0].split('-'); // YYYY-MM-DD
+            timeObj = { year: parseInt(parts[0]), month: parseInt(parts[1]), day: parseInt(parts[2]) };
+        } else {
+            timeObj = Math.floor(new Date(d.date.replace(' ', 'T') + 'Z').getTime() / 1000);
+            if (isNaN(timeObj)) {
+                 timeObj = Math.floor(new Date(d.date.replace(' ', 'T')).getTime() / 1000);
             }
         }
+        return { time: timeObj, open: d.open, high: d.high, low: d.low, close: d.close, volume: d.volume || 0 };
+    }).filter(d => {
+        const key = typeof d.time === 'object' ? `${d.time.year}-${d.time.month}-${d.time.day}` : d.time;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).sort((a,b) => {
+        const ta = typeof a.time === 'object' ? new Date(a.time.year, a.time.month-1, a.time.day).getTime() : a.time;
+        const tb = typeof b.time === 'object' ? new Date(b.time.year, b.time.month-1, b.time.day).getTime() : b.time;
+        return ta - tb;
     });
+
+    candleSeries.setData(formattedData);
+
+    const volumeSeries = priceChart.addHistogramSeries({
+        color: '#26a69a',
+        priceFormat: { type: 'volume' },
+        priceScaleId: '',
+        scaleMargins: { top: 0.8, bottom: 0 },
+    });
+
+    const volumeData = formattedData.map(d => ({
+        time: d.time,
+        value: d.volume,
+        color: d.close >= d.open ? 'rgba(63, 185, 80, 0.4)' : 'rgba(248, 81, 73, 0.4)'
+    }));
+
+    volumeSeries.setData(volumeData);
+    priceChart.timeScale().fitContent();
+
+    // Responsive resize
+    new ResizeObserver(entries => {
+        if (!entries || !entries.length || !priceChart) return;
+        const { width, height } = entries[0].contentRect;
+        priceChart.applyOptions({ width, height });
+    }).observe(container);
 }
 
 // ── Risk gauge ring ───────────────────────────────────────────────────────────
@@ -520,11 +435,11 @@ function drawRiskRing(prob) {
     ctx.scale(dpr, dpr);
     canvas.style.width = sz+"px"; canvas.style.height = sz+"px";
 
-    const cx=sz/2, cy=sz/2, r=58, lw=7, sa=-Math.PI/2;
+    const cx=sz/2, cy=sz/2, r=58, lw=8, sa=-Math.PI/2;
 
     // Track
     ctx.beginPath(); ctx.arc(cx,cy,r,0,2*Math.PI);
-    ctx.lineWidth=lw; ctx.strokeStyle="rgba(48,54,61,0.8)"; ctx.stroke();
+    ctx.lineWidth=lw; ctx.strokeStyle="rgba(48,54,61,0.5)"; ctx.stroke();
 
     // Arc colour
     const color = prob < 0.13 ? "#3fb950" : prob < 0.20 ? "#d29922" : "#f85149";
@@ -541,16 +456,23 @@ function drawRiskRing(prob) {
     } catch(e) {}
 
     const ea = sa + prob * 2 * Math.PI;
+    
+    // Smooth neon glow
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 12;
+    
     ctx.beginPath(); ctx.arc(cx,cy,r,sa,ea);
     ctx.lineWidth=lw; ctx.strokeStyle=arcStyle; ctx.lineCap="round"; ctx.stroke();
+    
+    ctx.shadowBlur = 0; // reset
 
     // Glow dot
     if (prob > 0.01) {
         const ex=cx+r*Math.cos(ea), ey=cy+r*Math.sin(ea);
-        const g = ctx.createRadialGradient(ex,ey,0,ex,ey,10);
+        const g = ctx.createRadialGradient(ex,ey,0,ex,ey,12);
         const rgb = prob<0.13?"63,185,80":prob<0.20?"210,153,34":"248,81,73";
-        g.addColorStop(0,`rgba(${rgb},.7)`); g.addColorStop(1,`rgba(${rgb},0)`);
-        ctx.beginPath(); ctx.arc(ex,ey,10,0,2*Math.PI); ctx.fillStyle=g; ctx.fill();
+        g.addColorStop(0,`rgba(${rgb},1)`); g.addColorStop(1,`rgba(${rgb},0)`);
+        ctx.beginPath(); ctx.arc(ex,ey,12,0,2*Math.PI); ctx.fillStyle=g; ctx.fill();
     }
 }
 
@@ -560,8 +482,11 @@ function drawHistory() {
     if (!canvas || !scanHistory.length) return;
     const ctx = canvas.getContext("2d");
     if (historyChart) { historyChart.destroy(); historyChart = null; }
-    const grad = ctx.createLinearGradient(0,0,0,100);
-    grad.addColorStop(0,"rgba(88,166,255,0.3)"); grad.addColorStop(1,"rgba(88,166,255,0)");
+    
+    const grad = ctx.createLinearGradient(0,0,0,120);
+    grad.addColorStop(0,"rgba(88,166,255,0.45)"); 
+    grad.addColorStop(1,"rgba(88,166,255,0.0)");
+    
     historyChart = new Chart(ctx, {
         type: "line",
         data: {
@@ -570,26 +495,32 @@ function drawHistory() {
                 data:              scanHistory.map(s=>s.v),
                 borderColor:       "#58a6ff",
                 backgroundColor:   grad,
-                borderWidth:       1.5,
-                pointRadius:       2,
+                borderWidth:       2,
+                pointRadius:       0,
+                pointHoverRadius:  4,
                 pointBackgroundColor:"#58a6ff",
                 fill:    true,
-                tension: 0.3,
+                tension: 0.4,
             }]
         },
         options:{
             responsive:true,maintainAspectRatio:false,
             plugins:{legend:{display:false},tooltip:{
-                backgroundColor:"#161b22",titleColor:"#e6edf3",bodyColor:"#8b949e",
-                cornerRadius:4,padding:8,
-                titleFont:{family:"'JetBrains Mono',monospace",size:10},
-                bodyFont: {family:"'JetBrains Mono',monospace",size:10},
+                backgroundColor:"rgba(22,27,34,0.9)",titleColor:"#e6edf3",bodyColor:"#8b949e",
+                borderColor: "rgba(88,166,255,0.3)", borderWidth: 1,
+                cornerRadius:6,padding:10,
+                titleFont:{family:"'JetBrains Mono',monospace",size:11},
+                bodyFont: {family:"'JetBrains Mono',monospace",size:11},
                 callbacks:{label:c=>`Risk: ${c.raw.toFixed(1)}%`}
             }},
             scales:{
                 x:{display:false},
-                y:{min:0,max:100,grid:{color:"rgba(48,54,61,0.5)"},
-                   ticks:{color:"#484f58",font:{size:9}}}
+                y:{min:0,max:100,grid:{color:"rgba(48,54,61,0.3)"},
+                   ticks:{color:"#484f58",font:{size:9},maxTicksLimit:5}}
+            },
+            interaction: {
+                mode: 'index',
+                intersect: false,
             }
         }
     });
